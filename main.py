@@ -6,7 +6,6 @@ import numpy as np
 from datetime import datetime
 from typing import List
 
-# Initialize the FastAPI app
 app = FastAPI()
 
 # Allow CORS for testing purposes (adjust as needed for production)
@@ -18,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global list for debug logs
+# Global list for debug logs.
 debug_logs = []
 
 def add_log(message: str):
@@ -26,19 +25,19 @@ def add_log(message: str):
     entry = f"{datetime.now().isoformat()}: {message}"
     debug_logs.append(entry)
     if len(debug_logs) > 50:
-        debug_logs.pop(0)  # Limit log size
+        debug_logs.pop(0)
     print(entry)
 
 def augment_image(img: np.ndarray) -> List[np.ndarray]:
     """
     Apply several transformations to an image to generate additional samples.
     Transformations include:
-      1. Horizontal flip
-      2. Zoom in by cropping a centered region
-      3. Increase brightness
-      4. Add Gaussian noise
-    
-    Returns a list including the original image and its augmented versions.
+      1. Horizontal flip.
+      2. Zoom in by cropping a centered region.
+      3. Increase brightness.
+      4. Add Gaussian noise.
+      
+    The list returned includes the original image as well.
     """
     augmented_images = [img]  # Include the original image
 
@@ -68,23 +67,20 @@ def augment_image(img: np.ndarray) -> List[np.ndarray]:
 
 def train_model(training_files: List[UploadFile]):
     """
-    Train an LBPH face recognizer using cropped face regions extracted from uploaded images 
-    and their augmented versions. Faces are detected using Haar cascades, resized to 100x100, 
-    and augmented. All images are assigned the label "UserFace" (label 0).
-    
-    Returns the trained recognizer and the expected label, or None if training fails.
+    Train an LBPH face recognizer using cropped face regions extracted from the uploaded images 
+    and their augmented versions. For each training file, a face is extracted using Haar cascades, 
+    resized to 100x100, then augmented.
+    Also creates a label dictionary for the predefined label ("UserFace").
+    Returns the trained recognizer and the expected label.
     """
     images = []
     labels = []
-    expected_label = 0  # Label for "UserFace"
+    expected_label = 0  # All images are assumed to be "UserFace"
 
     add_log(f"Received {len(training_files)} training files.")
     
-    # Initialize Haar cascade for face detection
+    # Initialize Haar cascade for face detection.
     detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-    if detector.empty():
-        add_log("Error: Failed to load Haar cascade file.")
-        raise HTTPException(status_code=500, detail="Face detection model not found.")
     
     for file in training_files:
         file_bytes = file.file.read()  # Read file bytes
@@ -94,22 +90,24 @@ def train_model(training_files: List[UploadFile]):
             add_log(f"Warning: Could not decode training file {file.filename}. Skipping.")
             continue
         
-        # Detect faces in the image
+        # Detect faces in the image.
         faces = detector.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
         if len(faces) == 0:
             add_log(f"No face detected in image {file.filename}. Skipping.")
             continue
 
-        # Process each detected face
+        # Process each detected face.
         for (x, y, w, h) in faces:
+            # Crop the face from the image.
             cropped = img[y:y + h, x:x + w]
             try:
+                # Resize the cropped face to a standard size.
                 cropped_resized = cv2.resize(cropped, (100, 100))
             except Exception as e:
                 add_log(f"Error resizing face in file {file.filename}: {e}")
                 continue
 
-            # Augment the cropped face
+            # Augment the cropped face.
             augmented_images = augment_image(cropped_resized)
             for aug_img in augmented_images:
                 images.append(aug_img)
@@ -125,9 +123,13 @@ def train_model(training_files: List[UploadFile]):
     labels_np = np.array(labels)
     add_log(f"Total augmented faces used for training: {len(images)}")
     
-    # Train the recognizer
+    # Create and train the recognizer on the augmented dataset.
     recognizer = cv2.face.LBPHFaceRecognizer_create()
     recognizer.train(images_np, labels_np)
+    
+    # Create label dictionary for the predefined label.
+    label_dict = {"UserFace": expected_label}
+    add_log(f"Label dictionary created: {label_dict}")
     
     add_log("Training completed successfully using cropped faces.")
     return recognizer, expected_label
@@ -135,10 +137,9 @@ def train_model(training_files: List[UploadFile]):
 def predict_image(recognizer, test_file: UploadFile, expected_label=0, threshold=99):
     """
     Predict the label of the test image using the trained recognizer.
-    The test image is decoded to grayscale, and faces are detected using Haar cascades.
-    Each detected face is cropped, resized to 100x100, and predicted.
-    
-    Returns True if any face matches the expected label with confidence below the threshold.
+    The test image is read, decoded to grayscale, and passed through a Haar cascade 
+    to detect face(s). Each detected face is cropped, resized (100x100) and predicted.
+    Returns True if any face in the image yields the expected label with confidence below the threshold.
     """
     file_bytes = test_file.file.read()
     np_arr = np.frombuffer(file_bytes, np.uint8)
@@ -147,19 +148,14 @@ def predict_image(recognizer, test_file: UploadFile, expected_label=0, threshold
         add_log("Error: Could not decode test image.")
         return False
 
-    # Initialize Haar cascade for face detection
+    # Detect faces using Haar cascade.
     detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-    if detector.empty():
-        add_log("Error: Failed to load Haar cascade file.")
-        raise HTTPException(status_code=500, detail="Face detection model not found.")
-
-    # Detect faces in the image
     faces = detector.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
     if len(faces) == 0:
         add_log("No face detected in test image.")
         return False
 
-    # Process each detected face
+    # Process each detected face.
     for (x, y, w, h) in faces:
         cropped = img[y:y+h, x:x+w]
         try:
@@ -175,7 +171,7 @@ def predict_image(recognizer, test_file: UploadFile, expected_label=0, threshold
 
         add_log(f"Predicted label: {label}, Confidence: {confidence}")
         if (label == expected_label) and (confidence < threshold):
-            return True  # Match found
+            return True  # Successfully verified if any detected face is a match.
 
     return False
 
@@ -184,7 +180,6 @@ async def verify_endpoint(
     training_images: List[UploadFile] = File(...),
     test_image: UploadFile = File(...)
 ):
-    """Endpoint to verify a test image against a set of training images."""
     add_log("Verification request received.")
     if not training_images or test_image is None:
         add_log("Error: Missing training images or test image.")
@@ -200,7 +195,8 @@ async def verify_endpoint(
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
     """
-    Debug page displaying the latest log entries.
+    Debug page for manual inspection.
+    Displays the latest log entries.
     """
     html_content = f"""
     <!DOCTYPE html>
