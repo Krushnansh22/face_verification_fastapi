@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 import os
@@ -9,7 +10,6 @@ from typing import List
 app = FastAPI()
 
 # Allow CORS for testing purposes (adjust as needed for production)
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,25 +28,6 @@ def add_log(message: str):
     if len(debug_logs) > 50:
         debug_logs.pop(0)
     print(entry)
-
-# Load Haarcascade for face detection.
-haarcascade_path = os.path.join("data", "haarcascade_frontalface_default.xml")
-if not os.path.exists(haarcascade_path):
-    raise FileNotFoundError(f"Haarcascade file not found at {haarcascade_path}")
-face_cascade = cv2.CascadeClassifier(haarcascade_path)
-
-def crop_face(img: np.ndarray) -> np.ndarray:
-    """
-    Detects a face in the image and crops the region.
-    If no face is detected, returns the original image.
-    """
-    faces = face_cascade.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
-    if len(faces) > 0:
-        x, y, w, h = faces[0]  # Use the first detected face.
-        return img[y:y+h, x:x+w]
-    else:
-        add_log("No face detected; using full image.")
-        return img
 
 def augment_image(img: np.ndarray) -> List[np.ndarray]:
     """
@@ -87,9 +68,9 @@ def augment_image(img: np.ndarray) -> List[np.ndarray]:
 
 def train_model(training_files: List[UploadFile]):
     """
-    Train an LBPH face recognizer using the cropped face regions from training images (with augmentations).
-    Each training file is read, decoded, the face (if detected) is cropped and resized to 100x100,
-    then augmented. Returns the trained recognizer and the expected label (0).
+    Train an LBPH face recognizer using both the training images and their augmented versions.
+    Each training file is read, decoded, resized to 100x100, and augmented.
+    Returns the trained recognizer and the expected label (0).
     """
     images = []
     labels = []
@@ -97,45 +78,41 @@ def train_model(training_files: List[UploadFile]):
 
     add_log(f"Received {len(training_files)} training files.")
     for file in training_files:
-        file_bytes = file.file.read()                # Read file bytes
+        file_bytes = file.file.read()  # Read file bytes
         np_arr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
         if img is None:
             add_log(f"Warning: Could not decode training file {file.filename}. Skipping.")
             continue
 
-        # Crop the face region using Haarcascade.
-        cropped_face = crop_face(img)
-        # Resize cropped face to 100x100 for consistency.
-        face_resized = cv2.resize(cropped_face, (100, 100))
-        
-        # Augment the cropped face.
-        augmented_images = augment_image(face_resized)
+        # Resize to a standard size for consistent training.
+        img_resized = cv2.resize(img, (100, 100))
+        # Augment the training image.
+        augmented_images = augment_image(img_resized)
         for aug_img in augmented_images:
             images.append(aug_img)
             labels.append(expected_label)
         file.file.seek(0)  # Reset pointer if needed
 
     if not images:
-        add_log("No valid training images found after face detection and augmentation.")
+        add_log("No valid training images found after augmentation.")
         return None, None
 
     images_np = np.array(images, dtype="uint8")
     labels_np = np.array(labels)
-    add_log(f"Received {len(images)} total augmented images.")
+    add_log(f"Received {len(images)} total")
     
-    # Create and train the LBPH face recognizer.
+    # Create and train the recognizer on the augmented dataset.
     recognizer = cv2.face.LBPHFaceRecognizer_create()
     recognizer.train(images_np, labels_np)
-    add_log("Training completed successfully with cropped face images.")
+    add_log("Training completed successfully with augmented images.")
     return recognizer, expected_label
 
 def predict_image(recognizer, test_file: UploadFile, expected_label=0, threshold=100):
     """
     Predict the label of the test image using the trained recognizer.
-    The test image is read, the face region is cropped using Haarcascade,
-    resized to 100x100, and then predicted. Returns True if the predicted label equals expected_label
-    and the confidence is below threshold.
+    The test image is read from memory, decoded, resized (100x100) and predicted.
+    Returns True if the predicted label equals expected_label and the confidence is below 100.
     """
     file_bytes = test_file.file.read()
     np_arr = np.frombuffer(file_bytes, np.uint8)
@@ -143,13 +120,9 @@ def predict_image(recognizer, test_file: UploadFile, expected_label=0, threshold
     if img is None:
         add_log("Error: Could not decode test image.")
         return False
-    
-    # Crop the face region.
-    cropped_face = crop_face(img)
-    face_resized = cv2.resize(cropped_face, (100, 100))
-    
+    img_resized = cv2.resize(img, (100, 100))
     try:
-        label, confidence = recognizer.predict(face_resized)
+        label, confidence = recognizer.predict(img_resized)
     except Exception as e:
         add_log(f"Prediction error: {e}")
         return False
@@ -199,7 +172,7 @@ async def read_root():
       </body>
     </html>
     """
-    return HTMLResponse(content=html_content)
+    return html_content
 
 if __name__ == "__main__":
     import uvicorn
