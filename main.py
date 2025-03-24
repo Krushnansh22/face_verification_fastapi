@@ -6,10 +6,10 @@ from datetime import datetime
 from typing import List
 import tempfile
 import traceback
+import asyncio
 
 app = FastAPI()
 
-# Allow CORS for testing (adjust for production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,11 +18,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Debug logs
 debug_logs = []
 
 def add_log(message: str):
-    """Add a log entry with a timestamp."""
     entry = f"{datetime.now().isoformat()}: {message}"
     debug_logs.append(entry)
     if len(debug_logs) > 50:
@@ -30,7 +28,6 @@ def add_log(message: str):
     print(entry)
 
 def augment_image(img: np.ndarray) -> List[np.ndarray]:
-    """Apply transformations to generate additional training samples."""
     try:
         augmented_images = [img]
         flipped = cv2.flip(img, 1)
@@ -44,16 +41,14 @@ def augment_image(img: np.ndarray) -> List[np.ndarray]:
         bright = cv2.convertScaleAbs(img, alpha=1.0, beta=50)
         augmented_images.append(bright)
         noise = np.random.normal(0, 10, img.shape)
-        noisy = img.astype(np.float32) + noise
-        noisy = np.clip(noisy, 0, 255).astype(np.uint8)
+        noisy = np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
         augmented_images.append(noisy)
         return augmented_images
     except Exception as e:
         add_log(f"Error in augment_image: {str(e)}")
         raise
 
-def train_model(xml_bytes: bytes, training_files: List[UploadFile]) -> tuple:
-    """Train an LBPH face recognizer with training images and their augmentations."""
+async def train_model(xml_bytes: bytes, training_files: List[UploadFile]) -> tuple:
     try:
         add_log(f"Received Haar Cascade XML with size {len(xml_bytes)} bytes.")
         with tempfile.NamedTemporaryFile(delete=True, suffix='.xml') as temp_file:
@@ -66,10 +61,10 @@ def train_model(xml_bytes: bytes, training_files: List[UploadFile]) -> tuple:
 
         images = []
         labels = []
-        expected_label = 0  # All images are "UserFace"
+        expected_label = 0
         add_log(f"Received {len(training_files)} training files.")
         for file in training_files:
-            file_bytes = file.file.read()
+            file_bytes = await file.read()
             np_arr = np.frombuffer(file_bytes, np.uint8)
             img = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
             if img is None:
@@ -79,16 +74,15 @@ def train_model(xml_bytes: bytes, training_files: List[UploadFile]) -> tuple:
             if len(faces) == 0:
                 add_log(f"No face detected in training image {file.filename}. Skipping.")
                 continue
-            # Use the first detected face
             for (x, y, w, h) in faces:
                 cropped = img[y:y+h, x:x+w]
-                break  # Take the first face
+                break
             img_resized = cv2.resize(cropped, (100, 100))
             augmented_images = augment_image(img_resized)
             for aug_img in augmented_images:
                 images.append(aug_img)
                 labels.append(expected_label)
-            file.file.seek(0)
+            await asyncio.sleep(0.01)  # Yield control to prevent blocking
         if not images:
             add_log("No valid training images with detectable faces found.")
             return None, None
@@ -103,8 +97,7 @@ def train_model(xml_bytes: bytes, training_files: List[UploadFile]) -> tuple:
         add_log(f"Error in train_model: {str(e)}")
         raise
 
-def predict_image(recognizer, test_file: UploadFile, xml_bytes: bytes, expected_label=0, threshold=100) -> bool:
-    """Predict the label of the test image using the trained recognizer and uploaded Haar Cascade XML."""
+async def predict_image(recognizer, test_file: UploadFile, xml_bytes: bytes, expected_label=0, threshold=100) -> bool:
     try:
         add_log(f"Received Haar Cascade XML with size {len(xml_bytes)} bytes.")
         with tempfile.NamedTemporaryFile(delete=True, suffix='.xml') as temp_file:
@@ -115,24 +108,21 @@ def predict_image(recognizer, test_file: UploadFile, xml_bytes: bytes, expected_
                 add_log("Error: Failed to load Haar Cascade classifier from uploaded XML.")
                 raise ValueError("Invalid Haar Cascade XML file.")
 
-        # Read and decode the test image
-        file_bytes = test_file.file.read()
+        file_bytes = await test_file.read()
         np_arr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
         if img is None:
             add_log("Error: Could not decode test image.")
             return False
 
-        # Detect faces
         faces = detector.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
         if len(faces) == 0:
             add_log("No face detected in test image.")
             return False
 
-        # Use the first detected face
         for (x, y, w, h) in faces:
             cropped = img[y:y+h, x:x+w]
-            break  # Take the first face
+            break
         img_resized = cv2.resize(cropped, (100, 100))
 
         label, confidence = recognizer.predict(img_resized)
@@ -148,31 +138,31 @@ async def verify_endpoint(
     test_image: UploadFile = File(...),
     haarcascade_xml: UploadFile = File(...)
 ):
-    """Verify the test image against the training images using the uploaded Haar Cascade XML."""
     add_log("Verification request received.")
     try:
-        if not training_images or test_image is None or haarcascade_xml is None:
-            add_log("Error: Missing training images, test image, or Haar Cascade XML.")
-            raise HTTPException(status_code=400, detail="Missing required files.")
+        xml_bytes = await haarcascade_xml.read()
 
-        # Read the XML bytes once and reuse
-        xml_bytes = await haarcascade_xml.read()  # Use await for async read
-
-        recognizer, expected_label = train_model(xml_bytes, training_images)
+        recognizer, expected_label = await asyncio.wait_for(
+            train_model(xml_bytes, training_images), timeout=30.0
+        )
         if recognizer is None:
             add_log("Training failed due to no valid images.")
             raise HTTPException(status_code=400, detail="Training failed. No valid images.")
 
-        verified = predict_image(recognizer, test_image, xml_bytes, expected_label)
+        verified = await asyncio.wait_for(
+            predict_image(recognizer, test_image, xml_bytes, expected_label), timeout=30.0
+        )
         add_log(f"Verification result: {'Verified' if verified else 'Not Verified'}.")
         return {"verified": verified}
+    except asyncio.TimeoutError:
+        add_log("Request timed out.")
+        raise HTTPException(status_code=504, detail="Request processing timed out.")
     except Exception as e:
         add_log(f"Server error: {str(e)}\nStack trace: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/logs")
 async def get_logs():
-    """Return debug logs for troubleshooting."""
     return {"logs": debug_logs}
 
 if __name__ == "__main__":
