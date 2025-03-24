@@ -120,7 +120,14 @@ def predict_image(recognizer, test_file: UploadFile, expected_label=0, threshold
     if img is None:
         add_log("Error: Could not decode test image.")
         return False
-    img_resized = cv2.resize(img, (100, 100))
+    detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+    faces = detector.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
+    if len(faces) == 0:
+        add_log("No face detected in test image.")
+        return False
+    for (x, y, w, h) in faces:
+        cropped = img[y:y+h, x:x+w]
+    img_resized = cv2.resize(cropped, (100, 100))
     try:
         label, confidence = recognizer.predict(img_resized)
     except Exception as e:
