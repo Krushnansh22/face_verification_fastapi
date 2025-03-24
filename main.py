@@ -17,6 +17,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # Debug logs
 debug_logs = []
 
@@ -51,7 +52,7 @@ def augment_image(img: np.ndarray) -> List[np.ndarray]:
         add_log(f"Error in augment_image: {str(e)}")
         raise
 
-def train_model(xml_file, training_files: List[UploadFile]) -> tuple:
+def train_model(xml_file: UploadFile, training_files: List[UploadFile]) -> tuple:
     """Train an LBPH face recognizer with training images and their augmentations."""
     try:
         xml_bytes = xml_file.file.read()
@@ -63,6 +64,7 @@ def train_model(xml_file, training_files: List[UploadFile]) -> tuple:
             if detector.empty():
                 add_log("Error: Failed to load Haar Cascade classifier from uploaded XML.")
                 raise ValueError("Invalid Haar Cascade XML file.")
+
         images = []
         labels = []
         expected_label = 0  # All images are "UserFace"
@@ -76,16 +78,20 @@ def train_model(xml_file, training_files: List[UploadFile]) -> tuple:
                 continue
             faces = detector.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
             if len(faces) == 0:
-                add_log("No face detected in test image.")
+                add_log(f"No face detected in training image {file.filename}. Skipping.")
                 continue
-            img_resized = cv2.resize(faces, (100, 100))
+            # Use the first detected face
+            for (x, y, w, h) in faces:
+                cropped = img[y:y+h, x:x+w]
+                break  # Take the first face
+            img_resized = cv2.resize(cropped, (100, 100))
             augmented_images = augment_image(img_resized)
             for aug_img in augmented_images:
                 images.append(aug_img)
                 labels.append(expected_label)
             file.file.seek(0)
         if not images:
-            add_log("No valid training images found after augmentation.")
+            add_log("No valid training images with detectable faces found.")
             return None, None
         images_np = np.array(images, dtype="uint8")
         labels_np = np.array(labels)
@@ -93,7 +99,7 @@ def train_model(xml_file, training_files: List[UploadFile]) -> tuple:
         recognizer = cv2.face.LBPHFaceRecognizer_create()
         recognizer.train(images_np, labels_np)
         add_log("Training completed successfully.")
-        return recognizer, labels
+        return recognizer, expected_label
     except Exception as e:
         add_log(f"Error in train_model: {str(e)}")
         raise
