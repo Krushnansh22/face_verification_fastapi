@@ -94,7 +94,7 @@ def train_model(xml_file, training_files: List[UploadFile]) -> tuple:
         recognizer = cv2.face.LBPHFaceRecognizer_create()
         recognizer.train(images_np, labels_np)
         add_log("Training completed successfully.")
-        return recognizer, expected_label
+        return recognizer, labels
     except Exception as e:
         add_log(f"Error in train_model: {str(e)}")
         raise
