@@ -78,7 +78,7 @@ def train_model(xml_file, training_files: List[UploadFile]) -> tuple:
             faces = detector.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
             if len(faces) == 0:
                 add_log("No face detected in test image.")
-            return False
+                continue
             img_resized = cv2.resize(faces, (100, 100))
             augmented_images = augment_image(img_resized)
             for aug_img in augmented_images:
