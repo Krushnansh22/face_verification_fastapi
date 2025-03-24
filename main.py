@@ -52,9 +52,18 @@ def augment_image(img: np.ndarray) -> List[np.ndarray]:
         add_log(f"Error in augment_image: {str(e)}")
         raise
 
-def train_model(training_files: List[UploadFile]) -> tuple:
+def train_model(xml_file, training_files: List[UploadFile]) -> tuple:
     """Train an LBPH face recognizer with training images and their augmentations."""
     try:
+        xml_bytes = xml_file.file.read()
+        add_log(f"Received Haar Cascade XML with size {len(xml_bytes)} bytes.")
+        with tempfile.NamedTemporaryFile(delete=True, suffix='.xml') as temp_file:
+            temp_file.write(xml_bytes)
+            temp_file.flush()
+            detector = cv2.CascadeClassifier(temp_file.name)
+            if detector.empty():
+                add_log("Error: Failed to load Haar Cascade classifier from uploaded XML.")
+                raise ValueError("Invalid Haar Cascade XML file.")
         images = []
         labels = []
         expected_label = 0  # All images are "UserFace"
@@ -66,7 +75,11 @@ def train_model(training_files: List[UploadFile]) -> tuple:
             if img is None:
                 add_log(f"Warning: Could not decode training file {file.filename}. Skipping.")
                 continue
-            img_resized = cv2.resize(img, (100, 100))
+            faces = detector.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
+            if len(faces) == 0:
+                add_log("No face detected in test image.")
+            return False
+            img_resized = cv2.resize(faces, (100, 100))
             augmented_images = augment_image(img_resized)
             for aug_img in augmented_images:
                 images.append(aug_img)
@@ -140,7 +153,7 @@ async def verify_endpoint(
             add_log("Error: Missing training images, test image, or Haar Cascade XML.")
             raise HTTPException(status_code=400, detail="Missing required files.")
 
-        recognizer, expected_label = train_model(training_images)
+        recognizer, expected_label = train_model(haarcascade_xml, training_images)
         if recognizer is None:
             add_log("Training failed due to no valid images.")
             raise HTTPException(status_code=400, detail="Training failed. No valid images.")
