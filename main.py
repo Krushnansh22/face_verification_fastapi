@@ -52,10 +52,9 @@ def augment_image(img: np.ndarray) -> List[np.ndarray]:
         add_log(f"Error in augment_image: {str(e)}")
         raise
 
-def train_model(xml_file: UploadFile, training_files: List[UploadFile]) -> tuple:
+def train_model(xml_bytes: bytes, training_files: List[UploadFile]) -> tuple:
     """Train an LBPH face recognizer with training images and their augmentations."""
     try:
-        xml_bytes = xml_file.file.read()
         add_log(f"Received Haar Cascade XML with size {len(xml_bytes)} bytes.")
         with tempfile.NamedTemporaryFile(delete=True, suffix='.xml') as temp_file:
             temp_file.write(xml_bytes)
@@ -104,11 +103,9 @@ def train_model(xml_file: UploadFile, training_files: List[UploadFile]) -> tuple
         add_log(f"Error in train_model: {str(e)}")
         raise
 
-def predict_image(recognizer, test_file: UploadFile, xml_file: UploadFile, expected_label=0, threshold=100) -> bool:
+def predict_image(recognizer, test_file: UploadFile, xml_bytes: bytes, expected_label=0, threshold=100) -> bool:
     """Predict the label of the test image using the trained recognizer and uploaded Haar Cascade XML."""
     try:
-        # Load the Haar Cascade classifier from the uploaded XML
-        xml_bytes = xml_file.file.read()
         add_log(f"Received Haar Cascade XML with size {len(xml_bytes)} bytes.")
         with tempfile.NamedTemporaryFile(delete=True, suffix='.xml') as temp_file:
             temp_file.write(xml_bytes)
@@ -158,12 +155,15 @@ async def verify_endpoint(
             add_log("Error: Missing training images, test image, or Haar Cascade XML.")
             raise HTTPException(status_code=400, detail="Missing required files.")
 
-        recognizer, expected_label = train_model(haarcascade_xml, training_images)
+        # Read the XML bytes once and reuse
+        xml_bytes = await haarcascade_xml.read()  # Use await for async read
+
+        recognizer, expected_label = train_model(xml_bytes, training_images)
         if recognizer is None:
             add_log("Training failed due to no valid images.")
             raise HTTPException(status_code=400, detail="Training failed. No valid images.")
 
-        verified = predict_image(recognizer, test_image, haarcascade_xml, expected_label)
+        verified = predict_image(recognizer, test_image, xml_bytes, expected_label)
         add_log(f"Verification result: {'Verified' if verified else 'Not Verified'}.")
         return {"verified": verified}
     except Exception as e:
