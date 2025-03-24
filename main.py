@@ -3,7 +3,6 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
-import os
 from datetime import datetime
 from typing import List
 import tempfile
