@@ -1,218 +1,140 @@
-using System;
-using System.Collections.ObjectModel;
-using System.IO;
-using System.Net.Http.Headers;
-using System.Text.Json;
-using Microsoft.Maui.Controls;
-using Microsoft.Maui.Storage;
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import cv2
+import numpy as np
+from datetime import datetime
+from typing import List
+import tempfile
 
-namespace API_Use
-{
-    public partial class MainPage : ContentPage
-    {
-        // Observable collections for storing file paths
-        public ObservableCollection<string> TrainingImages { get; set; } = new();
-        public ObservableCollection<string> TestImages { get; set; } = new();
-        public ObservableCollection<string> VerificationResults { get; set; } = new();
+app = FastAPI()
 
-        public MainPage()
-        {
-            InitializeComponent();
-            BindingContext = this;
-            CleanImageDirectories();
-            LoadTrainingImages();
-            LoadTestImages();
-        }
+# Allow CORS for testing (adjust for production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        // Helper method to convert a stream to a byte array
-        public static byte[] ConvertStreamToBytes(Stream stream)
-        {
-            using MemoryStream memoryStream = new MemoryStream();
-            stream.CopyTo(memoryStream);
-            return memoryStream.ToArray();
-        }
+# Debug logs
+debug_logs = []
 
-        // Cleans up previous image directories
-        private void CleanImageDirectories()
-        {
-            string appDataDir = FileSystem.AppDataDirectory;
-            string trainingDir = Path.Combine(appDataDir, "TrainingImages");
-            string testDir = Path.Combine(appDataDir, "TestImages");
+def add_log(message: str):
+    """Add a log entry with a timestamp."""
+    entry = f"{datetime.now().isoformat()}: {message}"
+    debug_logs.append(entry)
+    if len(debug_logs) > 50:
+        debug_logs.pop(0)
+    print(entry)
 
-            try
-            {
-                if (Directory.Exists(trainingDir))
-                    Directory.Delete(trainingDir, true);
-                if (Directory.Exists(testDir))
-                    Directory.Delete(testDir, true);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("Error cleaning directories: " + ex.Message);
-            }
-        }
+def augment_image(img: np.ndarray) -> List[np.ndarray]:
+    """Apply transformations to generate additional training samples."""
+    augmented_images = [img]
+    flipped = cv2.flip(img, 1)
+    augmented_images.append(flipped)
+    h, w = img.shape[:2]
+    start_row, start_col = int(0.1 * h), int(0.1 * w)
+    end_row, end_col = int(0.9 * h), int(0.9 * w)
+    cropped = img[start_row:end_row, start_col:end_col]
+    zoomed = cv2.resize(cropped, (w, h))
+    augmented_images.append(zoomed)
+    bright = cv2.convertScaleAbs(img, alpha=1.0, beta=50)
+    augmented_images.append(bright)
+    noise = np.random.normal(0, 10, img.shape)
+    noisy = img.astype(np.float32) + noise
+    noisy = np.clip(noisy, 0, 255).astype(np.uint8)
+    augmented_images.append(noisy)
+    return augmented_images
 
-        // Loads training images from storage
-        private void LoadTrainingImages()
-        {
-            string appDataDir = FileSystem.AppDataDirectory;
-            string trainingDir = Path.Combine(appDataDir, "TrainingImages");
-            if (Directory.Exists(trainingDir))
-            {
-                var files = Directory.GetFiles(trainingDir);
-                TrainingImages.Clear();
-                foreach (var file in files)
-                    TrainingImages.Add(file);
-            }
-        }
+def train_model(training_files: List[UploadFile]):
+    """Train an LBPH face recognizer with training images and their augmentations."""
+    images = []
+    labels = []
+    expected_label = 0  # All images are "UserFace"
+    add_log(f"Received {len(training_files)} training files.")
+    for file in training_files:
+        file_bytes = file.file.read()
+        np_arr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            add_log(f"Warning: Could not decode training file {file.filename}. Skipping.")
+            continue
+        img_resized = cv2.resize(img, (100, 100))
+        augmented_images = augment_image(img_resized)
+        for aug_img in augmented_images:
+            images.append(aug_img)
+            labels.append(expected_label)
+        file.file.seek(0)
+    if not images:
+        add_log("No valid training images found after augmentation.")
+        return None, None
+    images_np = np.array(images, dtype="uint8")
+    labels_np = np.array(labels)
+    addpublic_log(f"Training with {len(images)} total images (including augmentations).")
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
+    recognizer.train(images_np, labels_np)
+    add_log("Training completed successfully.")
+    return recognizer, expected_label
 
-        // Loads test images from storage
-        private void LoadTestImages()
-        {
-            string appDataDir = FileSystem.AppDataDirectory;
-            string testDir = Path.Combine(appDataDir, "TestImages");
-            if (Directory.Exists(testDir))
-            {
-                var files = Directory.GetFiles(testDir);
-                TestImages.Clear();
-                foreach (var file in files)
-                    TestImages.Add(file);
-            }
-        }
+def predict_image(recognizer, test_file: UploadFile, xml_file: UploadFile, expected_label=0, threshold=100):
+    """Predict the label of the test image using the trained recognizer and uploaded Haar Cascade XML."""
+    # Read the XML content and load the classifier
+    xml_bytes = xml_file.file.read()
+    with tempfile.NamedTemporaryFile(delete=True, suffix='.xml') as temp_file:
+        temp_file.write(xml_bytes)
+        temp_file.flush()
+        detector = cv2.CascadeClassifier(temp_file.name)
+        if detector.empty():
+            add_log("Error: Failed to load Haar Cascade classifier from uploaded XML.")
+            raise RuntimeError("Failed to load Haar Cascade classifier.")
 
-        // Event handler for capturing training selfies
-        private async void OnCaptureTrainingSelfieClicked(object sender, EventArgs e)
-        {
-            string[] prompts = new[]
-            {
-                "Please move your face close to the camera and tap Capture.",
-                "Now, please move your face a bit away and tap Capture.",
-                "Finally, face straight towards the camera and tap Capture."
-            };
+    # Read and decode the test image
+    file_bytes = test_file.file.read()
+    np_arr = np.frombuffer(file_bytes, np.uint8)
+    img = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        add_log("Error: Could not decode test image.")
+        return False
 
-            string appDataDir = FileSystem.AppDataDirectory;
-            string trainingDir = Path.Combine(appDataDir, "TrainingImages");
-            if (!Directory.Exists(trainingDir))
-                Directory.CreateDirectory(trainingDir);
+    # Detect faces
+    faces = detector.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5)
+    if len(faces) == 0:
+        add_log("No face detected in test image.")
+        return False
 
-            foreach (var prompt in prompts)
-            {
-                bool shouldCapture = await DisplayAlert("Capture Selfie", prompt, "Capture", "Skip");
-                if (shouldCapture)
-                {
-                    var photo = await MediaPicker.CapturePhotoAsync(new MediaPickerOptions { Title = "Selfie Capture" });
-                    if (photo != null)
-                    {
-                        byte[] photoBytes;
-                        using (var stream = await photo.OpenReadAsync())
-                        {
-                            photoBytes = ConvertStreamToBytes(stream);
-                        }
-                        string newFilePath = Path.Combine(trainingDir, $"{Guid.NewGuid()}.jpg");
-                        await File.WriteAllBytesAsync(newFilePath, photoBytes);
-                        TrainingImages.Add(newFilePath);
-                    }
-                }
-            }
-        }
+    for (x, y, w, h) in faces:
+        cropped = img[y:y+h, x:x+w]
+    img_resized = cv2.resize(cropped, (100, 100))
 
-        // Event handler for uploading test images
-        private async void OnUploadTestImagesClicked(object sender, EventArgs e)
-        {
-            try
-            {
-                var results = await FilePicker.PickMultipleAsync(new PickOptions
-                {
-                    PickerTitle = "Select Test Images",
-                    FileTypes = FilePickerFileType.Images
-                });
-                if (results != null)
-                {
-                    string appDataDir = FileSystem.AppDataDirectory;
-                    string testDir = Path.Combine(appDataDir, "TestImages");
-                    if (!Directory.Exists(testDir))
-                        Directory.CreateDirectory(testDir);
+    try:
+        label, confidence = recognizer.predict(img_resized)
+        add_log(f"Predicted label: {label}, Confidence: {confidence}")
+        return (label == expected_label) and (confidence < threshold)
+    except Exception as e:
+        add_log(f"Prediction error: {e}")
+        return False
 
-                    foreach (var result in results)
-                    {
-                        byte[] imageBytes;
-                        using (var stream = await result.OpenReadAsync())
-                        {
-                            imageBytes = ConvertStreamToBytes(stream);
-                        }
-                        string fileName = $"{Guid.NewGuid()}{Path.GetExtension(result.FileName)}";
-                        string newFilePath = Path.Combine(testDir, fileName);
-                        await File.WriteAllBytesAsync(newFilePath, imageBytes);
-                        TestImages.Add(newFilePath);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                await DisplayAlert("Error", ex.Message, "OK");
-            }
-        }
+@app.post("/verify")
+async def verify_endpoint(
+    training_images: List[UploadFile] = File(...),
+    test_image: UploadFile = File(...),
+    haarcascade_xml: UploadFile = File(...),
+):
+    """Verify the test image against the training images using the uploaded Haar Cascade XML."""
+    add_log("Verification request received.")
+    if not training_images or test_image is None or haarcascade_xml is None:
+        add_log("Error: Missing training images, test image, or Haar Cascade XML.")
+        raise HTTPException(status_code=400, detail="Missing required files.")
 
-        // Event handler for running verification
-        private async void OnRunVerificationClicked(object sender, EventArgs e)
-        {
-            if (TrainingImages.Count == 0 || TestImages.Count == 0)
-            {
-                await DisplayAlert("Info", "Please capture at least one training image and upload at least one test image.", "OK");
-                return;
-            }
+    recognizer, expected_label = train_model(training_images)
+    if recognizer is None:
+        raise HTTPException(status_code=400, detail="Training failed. No valid images.")
 
-            VerificationResults.Clear();
-            try
-            {
-                using var client = new HttpClient();
+    verified = predict_image(recognizer, test_image, haarcascade_xml, expected_label)
+    add_log(f"Verification result: {'Verified' if verified else 'Not Verified'}.")
+    return {"verified": verified}
 
-                foreach (var testImagePath in TestImages)
-                {
-                    using var form = new MultipartFormDataContent();
-
-                    // Add all training images
-                    foreach (var filePath in TrainingImages)
-                    {
-                        var trainingStream = File.OpenRead(filePath);
-                        var streamContent = new StreamContent(trainingStream);
-                        streamContent.Headers.ContentType = MediaTypeHeaderValue.Parse("image/jpeg");
-                        form.Add(streamContent, "training_images", Path.GetFileName(filePath));
-                    }
-
-                    // Add the current test image
-                    var testStream = File.OpenRead(testImagePath);
-                    var testStreamContent = new StreamContent(testStream);
-                    testStreamContent.Headers.ContentType = MediaTypeHeaderValue.Parse("image/jpeg");
-                    form.Add(testStreamContent, "test_image", Path.GetFileName(testImagePath));
-
-                    // Read the Haar Cascade XML directly from the file path in the app package
-                    using var xmlStream = await FileSystem.OpenAppPackageFileAsync("haarcascade_frontalface_default.xml");
-                    byte[] xmlBytes = ConvertStreamToBytes(xmlStream);
-                    var xmlContent = new ByteArrayContent(xmlBytes);
-                    xmlContent.Headers.ContentType = MediaTypeHeaderValue.Parse("application/xml");
-                    form.Add(xmlContent, "haarcascade_xml", "haarcascade_frontalface_default.xml");
-
-                    // Specify your FastAPI server URL
-                    string serverUrl = "https://face-verification-fastapi.onrender.com/verify";
-                    var response = await client.PostAsync(serverUrl, form);
-                    response.EnsureSuccessStatusCode();
-
-                    string responseString = await response.Content.ReadAsStringAsync();
-                    bool verified = false;
-                    using var doc = JsonDocument.Parse(responseString);
-                    if (doc.RootElement.TryGetProperty("verified", out JsonElement verifiedElement))
-                    {
-                        verified = verifiedElement.GetBoolean();
-                    }
-                    string resultText = $"Test Image ({Path.GetFileName(testImagePath)}): " + (verified ? "Verified" : "Not Verified");
-                    VerificationResults.Add(resultText);
-                }
-            }
-            catch (Exception ex)
-            {
-                await DisplayAlert("Verification Error", ex.Message, "OK");
-            }
-        }
-    }
-}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000)
