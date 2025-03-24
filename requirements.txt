@@ -5,3 +5,4 @@ opencv-contrib-python
 numpy
 opencv-python-headless
 tempfile312
+asyncio
